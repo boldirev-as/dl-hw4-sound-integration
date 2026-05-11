@@ -51,8 +51,8 @@ train:
   resume: null
 
 data:
-  train_root: /kaggle/input/librispeech/LibriSpeech/train-clean-100
-  valid_root: /kaggle/input/librispeech/LibriSpeech/test-clean
+  train_root: /kaggle/input/datasets/victorling/librispeech-clean/LibriSpeech/train-clean-100
+  valid_root: /kaggle/input/datasets/victorling/librispeech-clean/LibriSpeech/test-clean
   eval_num_files: 32
 
 logging:
