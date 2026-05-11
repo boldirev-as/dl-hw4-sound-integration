@@ -1,0 +1,12 @@
+__pycache__/
+.ipynb_checkpoints/
+.pytest_cache/
+.DS_Store
+.cometml-runs/
+outputs/
+artifacts/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/

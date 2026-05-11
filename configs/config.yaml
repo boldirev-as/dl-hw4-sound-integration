@@ -1,0 +1,77 @@
+seed: 42
+device: cuda
+
+audio:
+  sample_rate: 16000
+  crop_seconds: 0.5
+  n_mels: 80
+  mel_fmin: 0
+  mel_fmax: 8000
+  mel_fft_sizes: [512, 1024, 2048]
+  mel_hop_sizes: [128, 256, 512]
+  mel_win_lengths: [512, 1024, 2048]
+
+model:
+  base_channels: 32
+  latent_dim: 128
+  strides: [2, 4, 5, 5]
+  residual_kernel_size: 7
+  dilations: [1, 3, 9]
+  codebook_size: 1024
+  num_quantizers: 6
+  quantizer_decay: 0.99
+  quantizer_eps: 1.0e-5
+  quantizer_replace_threshold: 2.0
+
+discriminator:
+  wave_channels: 16
+  stft_channels: 32
+  stft_fft_sizes: [512, 1024, 2048]
+  stft_hop_sizes: [128, 256, 512]
+  stft_win_lengths: [512, 1024, 2048]
+
+losses:
+  mel_weight: 45.0
+  feature_matching_weight: 2.0
+  adversarial_weight: 1.0
+  commitment_weight: 1.0
+
+train:
+  batch_size: 12
+  num_workers: 2
+  learning_rate: 3.0e-4
+  betas: [0.5, 0.9]
+  max_steps: 45000
+  log_interval: 20
+  eval_interval: 1000
+  save_interval: 1000
+  clip_grad_norm: 5.0
+  amp: true
+  output_dir: /kaggle/working/outputs
+  resume: null
+
+data:
+  train_root: /kaggle/input/librispeech/LibriSpeech/train-clean-100
+  valid_root: /kaggle/input/librispeech/LibriSpeech/test-clean
+  eval_num_files: 32
+
+logging:
+  use_comet: true
+  comet_project_name: dl-hw4-soundstream
+  comet_workspace: null
+  comet_experiment_name: null
+  comet_tags: [soundstream, hw4, librispeech]
+
+eval:
+  checkpoint_path: /kaggle/working/outputs/checkpoints/final.pt
+  output_path: /kaggle/working/outputs/eval_metrics.json
+  use_nisqa: true
+
+infer:
+  checkpoint_path: checkpoints/final.pt
+  input_path: input.wav
+  output_path: reconstructed.wav
+
+checkpoint_download:
+  url: https://drive.google.com/uc?export=download&id=1cxuhJ-zLqiVbRreARDhfeih6f_39T3Rb
+  output_path: checkpoints/final.pt
