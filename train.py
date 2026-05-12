@@ -7,6 +7,7 @@ import comet_ml
 import numpy as np
 import torch
 import torchaudio
+import yaml
 from torch import nn
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
@@ -14,7 +15,6 @@ from tqdm import tqdm
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from soundstream.config import load_config
 from soundstream.losses import discriminator_loss, feature_matching_loss, generator_adversarial_loss
 from soundstream.metrics import MetricTracker, average_metrics
 from soundstream.model import build_discriminator, build_eval_loader, build_mel_loss, build_model, build_train_loader
@@ -117,7 +117,8 @@ def one_step(net, disc, mel, opt_g, opt_d, sc, wav, dev, cfg):
 
 
 def main():
-    cfg = load_config("configs/config.yaml")
+    with Path("configs/config.yaml").open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
     tr = cfg["train"]
 
     random.seed(cfg["seed"])

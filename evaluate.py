@@ -3,18 +3,19 @@ import sys
 from pathlib import Path
 
 import torch
+import yaml
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from soundstream.config import load_config
 from soundstream.metrics import MetricTracker, average_metrics
 from soundstream.model import build_eval_loader, build_mel_loss, build_model
 
 
 def main():
-    config = load_config("configs/config.yaml")
+    with Path("configs/config.yaml").open("r", encoding="utf-8") as file:
+        config = yaml.safe_load(file)
     device = torch.device(config["device"] if torch.cuda.is_available() else "cpu")
 
     checkpoint = torch.load(config["eval"]["checkpoint_path"], map_location=device)

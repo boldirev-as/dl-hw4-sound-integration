@@ -3,17 +3,18 @@ from pathlib import Path
 
 import torch
 import torchaudio
+import yaml
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from soundstream.config import load_config
 from soundstream.data import load_audio
 from soundstream.model import build_model
 
 
 def main():
-    config = load_config("configs/config.yaml")
+    with Path("configs/config.yaml").open("r", encoding="utf-8") as file:
+        config = yaml.safe_load(file)
     device = torch.device(config["device"] if torch.cuda.is_available() else "cpu")
 
     checkpoint = torch.load(config["infer"]["checkpoint_path"], map_location=device)
