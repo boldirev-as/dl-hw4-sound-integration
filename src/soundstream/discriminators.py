@@ -82,7 +82,7 @@ class STFTSubDiscriminator(nn.Module):
                     nn.Conv2d(
                         channels[index],
                         channels[index + 1],
-                        kernel_size=(stride[0] + 2, stride[1] + 2),
+                        kernel_size=(3, 3),
                         stride=stride,
                         padding=1,
                     ),
