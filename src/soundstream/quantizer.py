@@ -49,7 +49,8 @@ class VectorQuantizerEMA(nn.Module):
         self.initialized = True
 
     def forward(self, x):
-        flat_x = x.permute(0, 2, 1).reshape(-1, self.embedding_dim)
+        input_dtype = x.dtype
+        flat_x = x.permute(0, 2, 1).reshape(-1, self.embedding_dim).to(self.embedding.dtype)
         if self.training and not self.initialized and flat_x.size(0) >= self.codebook_size:
             self._kmeans_init(flat_x)
 
@@ -61,7 +62,7 @@ class VectorQuantizerEMA(nn.Module):
         encoding_indices = distances.argmin(dim=1)
         encodings = F.one_hot(encoding_indices, self.codebook_size).type_as(flat_x)
         quantized = F.embedding(encoding_indices, self.embedding).view(x.size(0), x.size(2), x.size(1))
-        quantized = quantized.permute(0, 2, 1)
+        quantized = quantized.permute(0, 2, 1).to(input_dtype)
 
         if self.training:
             assignment_count = encodings.sum(dim=0)
@@ -80,7 +81,7 @@ class VectorQuantizerEMA(nn.Module):
             stale_codes = self.cluster_size < self.replace_threshold
             if stale_codes.any():
                 random_indices = torch.randint(0, flat_x.size(0), (int(stale_codes.sum().item()),), device=flat_x.device)
-                replacement = flat_x[random_indices]
+                replacement = flat_x[random_indices].to(self.embedding.dtype)
                 self.embedding[stale_codes] = replacement
                 self.embedding_avg[stale_codes] = replacement
                 self.cluster_size[stale_codes] = self.replace_threshold
