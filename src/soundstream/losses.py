@@ -28,6 +28,9 @@ class MultiScaleMelSpectrogramLoss(nn.Module):
         for transform in self.transforms:
             pred_mel = transform(predicted.squeeze(1)).clamp_min(1e-5).log()
             target_mel = transform(target.squeeze(1)).clamp_min(1e-5).log()
+            n = min(pred_mel.size(-1), target_mel.size(-1))
+            pred_mel = pred_mel[..., :n]
+            target_mel = target_mel[..., :n]
             loss = loss + F.l1_loss(pred_mel, target_mel)
         return loss / len(self.transforms)
 
