@@ -65,26 +65,27 @@ class VectorQuantizerEMA(nn.Module):
         quantized = quantized.permute(0, 2, 1).to(input_dtype)
 
         if self.training:
-            assignment_count = encodings.sum(dim=0)
-            dw = encodings.t() @ flat_x
-            self.cluster_size.mul_(self.decay).add_(assignment_count, alpha=1.0 - self.decay)
-            self.embedding_avg.mul_(self.decay).add_(dw, alpha=1.0 - self.decay)
+            with torch.no_grad():
+                assignment_count = encodings.detach().sum(dim=0)
+                dw = encodings.detach().t() @ flat_x.detach()
+                self.cluster_size.mul_(self.decay).add_(assignment_count, alpha=1.0 - self.decay)
+                self.embedding_avg.mul_(self.decay).add_(dw, alpha=1.0 - self.decay)
 
-            cluster_size = (
-                (self.cluster_size + self.eps)
-                / (self.cluster_size.sum() + self.codebook_size * self.eps)
-                * self.cluster_size.sum()
-            )
-            normalized = self.embedding_avg / cluster_size.unsqueeze(1)
-            self.embedding.copy_(normalized)
+                cluster_size = (
+                    (self.cluster_size + self.eps)
+                    / (self.cluster_size.sum() + self.codebook_size * self.eps)
+                    * self.cluster_size.sum()
+                )
+                normalized = self.embedding_avg / cluster_size.unsqueeze(1)
+                self.embedding.copy_(normalized)
 
-            stale_codes = self.cluster_size < self.replace_threshold
-            if stale_codes.any():
-                random_indices = torch.randint(0, flat_x.size(0), (int(stale_codes.sum().item()),), device=flat_x.device)
-                replacement = flat_x[random_indices].to(self.embedding.dtype)
-                self.embedding[stale_codes] = replacement
-                self.embedding_avg[stale_codes] = replacement
-                self.cluster_size[stale_codes] = self.replace_threshold
+                stale_codes = self.cluster_size < self.replace_threshold
+                if stale_codes.any():
+                    random_indices = torch.randint(0, flat_x.size(0), (int(stale_codes.sum().item()),), device=flat_x.device)
+                    replacement = flat_x.detach()[random_indices].to(self.embedding.dtype)
+                    self.embedding[stale_codes] = replacement
+                    self.embedding_avg[stale_codes] = replacement
+                    self.cluster_size[stale_codes] = self.replace_threshold
 
         avg_probs = encodings.float().mean(dim=0)
         perplexity = torch.exp(-(avg_probs * (avg_probs + 1e-10).log()).sum())
