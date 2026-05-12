@@ -1,10 +1,12 @@
 import itertools
+import random
 import sys
 from pathlib import Path
 
+import comet_ml
+import numpy as np
 import torch
 import torchaudio
-from comet_ml import Experiment
 from torch import nn
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
@@ -13,266 +15,177 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from soundstream.config import load_config
-from soundstream.losses import (
-    discriminator_loss,
-    feature_matching_loss,
-    generator_adversarial_loss,
-)
+from soundstream.losses import discriminator_loss, feature_matching_loss, generator_adversarial_loss
 from soundstream.metrics import MetricTracker, average_metrics
 from soundstream.model import build_discriminator, build_eval_loader, build_mel_loss, build_model, build_train_loader
-from soundstream.utils import count_parameters, ensure_dir, seed_everything
 
 
-def flatten_disc_outputs(outputs):
-    return outputs["wave"] + outputs["stft"]
+def flat(x):
+    return x["wave"] + x["stft"]
 
 
-def save_checkpoint(path, model, discriminator, optimizer_g, optimizer_d, step, config):
+def save(path, net, disc, opt_g, opt_d, i, cfg):
     torch.save(
         {
-            "model": model.state_dict(),
-            "discriminator": discriminator.state_dict(),
-            "optimizer_g": optimizer_g.state_dict(),
-            "optimizer_d": optimizer_d.state_dict(),
-            "step": step,
-            "config": config,
+            "model": net.state_dict(),
+            "discriminator": disc.state_dict(),
+            "optimizer_g": opt_g.state_dict(),
+            "optimizer_d": opt_d.state_dict(),
+            "step": i,
+            "config": cfg,
         },
         path,
     )
 
 
 @torch.no_grad()
-def evaluate(
-    model,
-    mel_loss_fn,
-    eval_loader,
-    device,
-    sample_rate,
-    use_nisqa,
-):
-    model.eval()
-    tracker = MetricTracker(sample_rate=sample_rate, use_nisqa=use_nisqa)
-    mel_values = []
-    metric_values = []
-    for audio, _ in eval_loader:
-        audio = audio.to(device)
-        output = model(audio)
-        reconstructed = output["audio"][..., : audio.size(-1)]
-        mel_values.append(float(mel_loss_fn(reconstructed, audio).item()))
-        metric_values.append(tracker.update(reconstructed, audio))
-    metrics = average_metrics(metric_values)
-    metrics["mel"] = sum(mel_values) / len(mel_values)
-    model.train()
-    return metrics
+def val(net, mel, dl, dev, sr):
+    net.eval()
+    mt = MetricTracker(sr, True)
+    ms = []
+    xs = []
+    for wav, _ in dl:
+        wav = wav.to(dev)
+        rec = net(wav)["audio"][..., : wav.size(-1)]
+        ms.append(float(mel(rec, wav).item()))
+        xs.append(mt.update(rec, wav))
+    out = average_metrics(xs)
+    out["mel"] = sum(ms) / len(ms)
+    net.train()
+    return out
 
 
-def log_comet(experiment, data, step):
-    for key, value in data.items():
-        experiment.log_metric(key, value, step=step)
+def log(exp, data, i):
+    for k, v in data.items():
+        exp.log_metric(k, v, step=i)
 
 
-def maybe_init_comet(config):
-    logging_config = config["logging"]
-    experiment = Experiment(
-        project_name=logging_config["comet_project_name"],
-        workspace=logging_config["comet_workspace"],
-    )
-    experiment.set_name(logging_config["comet_experiment_name"])
-    experiment.add_tags(logging_config["comet_tags"])
-    experiment.log_parameters(config)
-    return experiment
+def one_step(net, disc, mel, opt_g, opt_d, sc, wav, dev, cfg):
+    wav = wav.to(dev, non_blocking=True).clamp(-1, 1)
+    tr = cfg["train"]
+    lw = cfg["losses"]
+    amp = tr["amp"] and dev.type == "cuda"
 
+    with autocast(enabled=amp):
+        out = net(wav)
+        rec = out["audio"][..., : wav.size(-1)]
+        fake = flat(disc(rec.detach()))
+        real = flat(disc(wav))
+        d_loss = discriminator_loss(real, fake)
 
-def train_step(
-    model,
-    discriminator,
-    mel_loss_fn,
-    optimizer_g,
-    optimizer_d,
-    scaler,
-    batch,
-    device,
-    config,
-):
-    batch = batch.to(device, non_blocking=True)
-    batch = batch.clamp(-1.0, 1.0)
+    opt_d.zero_grad(set_to_none=True)
+    sc.scale(d_loss).backward()
+    sc.unscale_(opt_d)
+    nn.utils.clip_grad_norm_(disc.parameters(), tr["clip_grad_norm"])
+    sc.step(opt_d)
 
-    losses_config = config["losses"]
-    train_config = config["train"]
-    amp_enabled = train_config["amp"] and device.type == "cuda"
-
-    with autocast(enabled=amp_enabled):
-        model_output = model(batch)
-        reconstructed = model_output["audio"][..., : batch.size(-1)]
-        fake_disc_outputs = flatten_disc_outputs(discriminator(reconstructed.detach()))
-        real_disc_outputs = flatten_disc_outputs(discriminator(batch))
-        d_loss = discriminator_loss(real_disc_outputs, fake_disc_outputs)
-
-    optimizer_d.zero_grad(set_to_none=True)
-    scaler.scale(d_loss).backward()
-    scaler.unscale_(optimizer_d)
-    nn.utils.clip_grad_norm_(discriminator.parameters(), train_config["clip_grad_norm"])
-    scaler.step(optimizer_d)
-
-    with autocast(enabled=amp_enabled):
-        model_output = model(batch)
-        reconstructed = model_output["audio"][..., : batch.size(-1)]
-        fake_disc_outputs = flatten_disc_outputs(discriminator(reconstructed))
-        real_disc_outputs = flatten_disc_outputs(discriminator(batch))
-        mel_loss = mel_loss_fn(reconstructed, batch)
-        adv_loss = generator_adversarial_loss(fake_disc_outputs)
-        fm_loss = feature_matching_loss(real_disc_outputs, fake_disc_outputs)
-        commitment_loss = model_output["commitment_loss"]
-        codebook_loss = model_output["codebook_loss"]
+    with autocast(enabled=amp):
+        out = net(wav)
+        rec = out["audio"][..., : wav.size(-1)]
+        fake = flat(disc(rec))
+        real = flat(disc(wav))
+        mel_loss = mel(rec, wav)
+        adv = generator_adversarial_loss(fake)
+        fm = feature_matching_loss(real, fake)
+        commit = out["commitment_loss"]
+        code = out["codebook_loss"]
         g_loss = (
-            losses_config["mel_weight"] * mel_loss
-            + losses_config["feature_matching_weight"] * fm_loss
-            + losses_config["adversarial_weight"] * adv_loss
-            + losses_config["commitment_weight"] * commitment_loss
-            + codebook_loss
+            lw["mel_weight"] * mel_loss
+            + lw["feature_matching_weight"] * fm
+            + lw["adversarial_weight"] * adv
+            + lw["commitment_weight"] * commit
+            + code
         )
 
-    optimizer_g.zero_grad(set_to_none=True)
-    scaler.scale(g_loss).backward()
-    scaler.unscale_(optimizer_g)
-    nn.utils.clip_grad_norm_(model.parameters(), train_config["clip_grad_norm"])
-    scaler.step(optimizer_g)
-    scaler.update()
+    opt_g.zero_grad(set_to_none=True)
+    sc.scale(g_loss).backward()
+    sc.unscale_(opt_g)
+    nn.utils.clip_grad_norm_(net.parameters(), tr["clip_grad_norm"])
+    sc.step(opt_g)
+    sc.update()
 
     return {
-        "generator_loss": float(g_loss.item()),
-        "discriminator_loss": float(d_loss.item()),
-        "mel_loss": float(mel_loss.item()),
-        "adv_loss": float(adv_loss.item()),
-        "feature_matching_loss": float(fm_loss.item()),
-        "commitment_loss": float(commitment_loss.item()),
-        "codebook_loss": float(codebook_loss.item()),
-        "perplexity": float(model_output["perplexity"].item()),
+        "g": float(g_loss.item()),
+        "d": float(d_loss.item()),
+        "mel": float(mel_loss.item()),
+        "adv": float(adv.item()),
+        "fm": float(fm.item()),
+        "commit": float(commit.item()),
+        "code": float(code.item()),
+        "ppl": float(out["perplexity"].item()),
     }
 
 
 def main():
-    config = load_config("configs/config.yaml")
+    cfg = load_config("configs/config.yaml")
+    tr = cfg["train"]
 
-    seed_everything(config["seed"])
-    output_dir = ensure_dir(config["train"]["output_dir"])
-    checkpoints_dir = ensure_dir(output_dir / "checkpoints")
-    samples_dir = ensure_dir(output_dir / "samples")
+    random.seed(cfg["seed"])
+    np.random.seed(cfg["seed"])
+    torch.manual_seed(cfg["seed"])
+    torch.cuda.manual_seed_all(cfg["seed"])
 
-    device = torch.device(config["device"] if torch.cuda.is_available() else "cpu")
-    model = build_model(config).to(device)
-    discriminator = build_discriminator(config).to(device)
-    mel_loss_fn = build_mel_loss(config).to(device)
+    out_dir = Path(tr["output_dir"])
+    ckpt_dir = out_dir / "checkpoints"
+    wav_dir = out_dir / "samples"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    wav_dir.mkdir(parents=True, exist_ok=True)
 
-    optimizer_g = torch.optim.AdamW(
-        model.parameters(),
-        lr=config["train"]["learning_rate"],
-        betas=tuple(config["train"]["betas"]),
+    dev = torch.device(cfg["device"] if torch.cuda.is_available() else "cpu")
+    net = build_model(cfg).to(dev)
+    disc = build_discriminator(cfg).to(dev)
+    mel = build_mel_loss(cfg).to(dev)
+
+    opt_g = torch.optim.AdamW(net.parameters(), lr=tr["learning_rate"], betas=tuple(tr["betas"]))
+    opt_d = torch.optim.AdamW(disc.parameters(), lr=tr["learning_rate"], betas=tuple(tr["betas"]))
+    sc = GradScaler(enabled=tr["amp"] and dev.type == "cuda")
+
+    start = 0
+    if tr["resume"]:
+        ckpt = torch.load(tr["resume"], map_location=dev)
+        net.load_state_dict(ckpt["model"])
+        disc.load_state_dict(ckpt["discriminator"])
+        opt_g.load_state_dict(ckpt["optimizer_g"])
+        opt_d.load_state_dict(ckpt["optimizer_d"])
+        start = int(ckpt["step"])
+
+    train_dl = build_train_loader(cfg)
+    val_dl = build_eval_loader(cfg)
+    data = itertools.cycle(train_dl)
+
+    exp = comet_ml.Experiment(
+        project_name=cfg["logging"]["comet_project_name"],
+        workspace=cfg["logging"]["comet_workspace"],
     )
-    optimizer_d = torch.optim.AdamW(
-        discriminator.parameters(),
-        lr=config["train"]["learning_rate"],
-        betas=tuple(config["train"]["betas"]),
-    )
-    scaler = GradScaler(enabled=config["train"]["amp"] and device.type == "cuda")
+    exp.set_name(cfg["logging"]["comet_experiment_name"])
+    exp.add_tags(cfg["logging"]["comet_tags"])
+    exp.log_parameters(cfg)
 
-    start_step = 0
-    if config["train"]["resume"]:
-        checkpoint = torch.load(config["train"]["resume"], map_location=device)
-        model.load_state_dict(checkpoint["model"])
-        discriminator.load_state_dict(checkpoint["discriminator"])
-        optimizer_g.load_state_dict(checkpoint["optimizer_g"])
-        optimizer_d.load_state_dict(checkpoint["optimizer_d"])
-        start_step = int(checkpoint["step"])
+    bar = tqdm(range(start, tr["max_steps"]), initial=start, total=tr["max_steps"])
+    for i in bar:
+        m = one_step(net, disc, mel, opt_g, opt_d, sc, next(data), dev, cfg)
+        bar.set_postfix(g=f"{m['g']:.3f}", d=f"{m['d']:.3f}", mel=f"{m['mel']:.3f}", ppl=f"{m['ppl']:.2f}")
 
-    train_loader = build_train_loader(config)
-    eval_loader = build_eval_loader(config)
+        if i % tr["log_interval"] == 0:
+            log(exp, m, i)
 
-    experiment = maybe_init_comet(config)
-    log_comet(
-        experiment,
-        {
-            "num_parameters_generator": count_parameters(model),
-            "num_parameters_discriminator": count_parameters(discriminator),
-        },
-        step=start_step,
-    )
+        if i > 0 and i % tr["eval_interval"] == 0:
+            vm = val(net, mel, val_dl, dev, cfg["audio"]["sample_rate"])
+            log(exp, {f"eval_{k}": v for k, v in vm.items()}, i)
 
-    data_iterator = itertools.cycle(train_loader)
-    progress = tqdm(range(start_step, config["train"]["max_steps"]), initial=start_step, total=config["train"]["max_steps"])
-    for step in progress:
-        batch = next(data_iterator)
-        train_metrics = train_step(
-            model=model,
-            discriminator=discriminator,
-            mel_loss_fn=mel_loss_fn,
-            optimizer_g=optimizer_g,
-            optimizer_d=optimizer_d,
-            scaler=scaler,
-            batch=batch,
-            device=device,
-            config=config,
-        )
-
-        progress.set_postfix(
-            generator=f"{train_metrics['generator_loss']:.3f}",
-            discriminator=f"{train_metrics['discriminator_loss']:.3f}",
-            mel=f"{train_metrics['mel_loss']:.3f}",
-            perplexity=f"{train_metrics['perplexity']:.2f}",
-        )
-
-        if step % config["train"]["log_interval"] == 0:
-            log_comet(experiment, train_metrics, step=step)
-
-        if step > 0 and step % config["train"]["eval_interval"] == 0:
-            eval_metrics = evaluate(
-                model=model,
-                mel_loss_fn=mel_loss_fn,
-                eval_loader=eval_loader,
-                device=device,
-                sample_rate=config["audio"]["sample_rate"],
-                use_nisqa=True,
-            )
-            log_comet(experiment, {f"eval/{key}": value for key, value in eval_metrics.items()}, step=step)
-
-            sample_audio, sample_name = next(iter(eval_loader))
-            sample_audio = sample_audio.to(device)
+            wav, name = next(iter(val_dl))
+            wav = wav.to(dev)
             with torch.no_grad():
-                sample_output = model(sample_audio)
-            reconstructed = sample_output["audio"][..., : sample_audio.size(-1)].cpu()
-            sample_path = samples_dir / f"{step:07d}_{sample_name[0]}_reconstructed.wav"
-            torchaudio.save(sample_path, reconstructed[0], config["audio"]["sample_rate"])
-            if experiment is not None:
-                experiment.log_audio(
-                    file_data=str(sample_path),
-                    file_name=sample_path.name,
-                    sample_rate=config["audio"]["sample_rate"],
-                    step=step,
-                    metadata={"source_file": sample_name[0]},
-                )
+                rec = net(wav)["audio"][..., : wav.size(-1)].cpu()
+            path = wav_dir / f"{i:07d}_{name[0]}.wav"
+            torchaudio.save(path, rec[0], cfg["audio"]["sample_rate"])
+            exp.log_audio(str(path), file_name=path.name, sample_rate=cfg["audio"]["sample_rate"], step=i)
 
-        if step > 0 and step % config["train"]["save_interval"] == 0:
-            save_checkpoint(
-                checkpoints_dir / f"step_{step:07d}.pt",
-                model=model,
-                discriminator=discriminator,
-                optimizer_g=optimizer_g,
-                optimizer_d=optimizer_d,
-                step=step,
-                config=config,
-            )
+        if i > 0 and i % tr["save_interval"] == 0:
+            save(ckpt_dir / f"step_{i:07d}.pt", net, disc, opt_g, opt_d, i, cfg)
 
-    save_checkpoint(
-        checkpoints_dir / "final.pt",
-        model=model,
-        discriminator=discriminator,
-        optimizer_g=optimizer_g,
-        optimizer_d=optimizer_d,
-        step=config["train"]["max_steps"],
-        config=config,
-    )
-    if experiment is not None:
-        experiment.end()
+    save(ckpt_dir / "final.pt", net, disc, opt_g, opt_d, tr["max_steps"], cfg)
+    exp.end()
 
 
 if __name__ == "__main__":
