@@ -12,6 +12,9 @@ class MetricTracker:
     def update(self, prediction, target):
         prediction = prediction.squeeze(1).detach().cpu()
         target = target.squeeze(1).detach().cpu()
+        n = min(prediction.size(-1), target.size(-1))
+        prediction = prediction[..., :n]
+        target = target[..., :n]
         metrics = {"stoi": float(self.stoi(prediction, target).item())}
         if self.nisqa is not None:
             metrics["nisqa"] = float(self.nisqa(prediction).mean().item())
