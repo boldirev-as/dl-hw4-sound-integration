@@ -1,6 +1,6 @@
 from pathlib import Path
-from urllib.request import urlretrieve
 
+import gdown
 import yaml
 
 
@@ -9,7 +9,7 @@ def main():
         config = yaml.safe_load(file)
     output_path = Path(config["checkpoint_download"]["output_path"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    urlretrieve(config["checkpoint_download"]["url"], output_path)
+    gdown.download(config["checkpoint_download"]["url"], str(output_path), quiet=False, fuzzy=True)
     print(f"Checkpoint saved to {output_path}")
 
 

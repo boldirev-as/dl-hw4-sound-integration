@@ -9,6 +9,7 @@ librosa>=0.10.1
 PyYAML>=6.0.1
 tqdm>=4.66.0
 comet_ml>=3.44.4
+gdown>=5.2.0
 matplotlib>=3.8.0
 pandas>=2.2.0
 jupyter>=1.0.0
