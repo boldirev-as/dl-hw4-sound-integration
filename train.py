@@ -9,7 +9,7 @@ import torch
 import torchaudio
 import yaml
 from torch import nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parent
@@ -67,7 +67,7 @@ def one_step(net, disc, mel, opt_g, opt_d, sc, wav, dev, cfg):
     lw = cfg["losses"]
     amp = tr["amp"] and dev.type == "cuda"
 
-    with autocast(enabled=amp):
+    with autocast("cuda", enabled=amp):
         out = net(wav)
         rec = out["audio"][..., : wav.size(-1)].clamp(-1, 1)
         fake = flat(disc(rec.detach()))
@@ -81,7 +81,7 @@ def one_step(net, disc, mel, opt_g, opt_d, sc, wav, dev, cfg):
         nn.utils.clip_grad_norm_(disc.parameters(), tr["clip_grad_norm"])
         sc.step(opt_d)
 
-    with autocast(enabled=amp):
+    with autocast("cuda", enabled=amp):
         out = net(wav)
         rec = out["audio"][..., : wav.size(-1)].clamp(-1, 1)
         fake = flat(disc(rec))
@@ -142,7 +142,7 @@ def main():
 
     opt_g = torch.optim.AdamW(net.parameters(), lr=tr["learning_rate"], betas=tuple(tr["betas"]))
     opt_d = torch.optim.AdamW(disc.parameters(), lr=tr["learning_rate"], betas=tuple(tr["betas"]))
-    sc = GradScaler(enabled=tr["amp"] and dev.type == "cuda")
+    sc = GradScaler("cuda", enabled=tr["amp"] and dev.type == "cuda")
 
     start = 0
     if tr["resume"]:
