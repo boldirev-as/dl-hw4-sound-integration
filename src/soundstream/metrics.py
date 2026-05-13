@@ -15,6 +15,8 @@ class MetricTracker:
         n = min(prediction.size(-1), target.size(-1))
         prediction = prediction[..., :n]
         target = target[..., :n]
+        prediction = torch.nan_to_num(prediction, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-1, 1)
+        target = torch.nan_to_num(target, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-1, 1)
         metrics = {"stoi": float(self.stoi(prediction, target).item())}
         if self.nisqa is not None:
             metrics["nisqa"] = float(self.nisqa(prediction).mean().item())

@@ -47,6 +47,7 @@ def val(net, mel, dl, dev, sr):
     for wav, _ in dl:
         wav = wav.to(dev)
         rec = net(wav)["audio"][..., : wav.size(-1)]
+        rec = torch.nan_to_num(rec, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-1, 1)
         ms.append(float(mel(rec, wav).item()))
         xs.append(mt.update(rec, wav))
     out = average_metrics(xs)
@@ -68,20 +69,21 @@ def one_step(net, disc, mel, opt_g, opt_d, sc, wav, dev, cfg):
 
     with autocast(enabled=amp):
         out = net(wav)
-        rec = out["audio"][..., : wav.size(-1)]
+        rec = out["audio"][..., : wav.size(-1)].clamp(-1, 1)
         fake = flat(disc(rec.detach()))
         real = flat(disc(wav))
         d_loss = discriminator_loss(real, fake)
 
     opt_d.zero_grad(set_to_none=True)
-    sc.scale(d_loss).backward()
-    sc.unscale_(opt_d)
-    nn.utils.clip_grad_norm_(disc.parameters(), tr["clip_grad_norm"])
-    sc.step(opt_d)
+    if torch.isfinite(d_loss):
+        sc.scale(d_loss).backward()
+        sc.unscale_(opt_d)
+        nn.utils.clip_grad_norm_(disc.parameters(), tr["clip_grad_norm"])
+        sc.step(opt_d)
 
     with autocast(enabled=amp):
         out = net(wav)
-        rec = out["audio"][..., : wav.size(-1)]
+        rec = out["audio"][..., : wav.size(-1)].clamp(-1, 1)
         fake = flat(disc(rec))
         real = flat(disc(wav))
         mel_loss = mel(rec, wav)
@@ -98,10 +100,11 @@ def one_step(net, disc, mel, opt_g, opt_d, sc, wav, dev, cfg):
         )
 
     opt_g.zero_grad(set_to_none=True)
-    sc.scale(g_loss).backward()
-    sc.unscale_(opt_g)
-    nn.utils.clip_grad_norm_(net.parameters(), tr["clip_grad_norm"])
-    sc.step(opt_g)
+    if torch.isfinite(g_loss):
+        sc.scale(g_loss).backward()
+        sc.unscale_(opt_g)
+        nn.utils.clip_grad_norm_(net.parameters(), tr["clip_grad_norm"])
+        sc.step(opt_g)
     sc.update()
 
     return {
